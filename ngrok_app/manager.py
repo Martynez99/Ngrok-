@@ -1,6 +1,7 @@
 """Ngrok tunnel manager module."""
 
 import logging
+import threading
 from typing import Dict, List, Optional
 from pyngrok import ngrok
 from .config import config
@@ -17,6 +18,7 @@ class NgrokManager:
         if config.ngrok_authtoken:
             ngrok.set_auth_token(config.ngrok_authtoken)
         self.tunnels: Dict[str, object] = {}
+        self._lock = threading.Lock()
 
     def create_tunnel(
         self, protocol: str, local_addr: str, local_port: int, name: Optional[str] = None
@@ -36,7 +38,8 @@ class NgrokManager:
         try:
             tunnel = ngrok.connect((local_addr, local_port), proto=protocol)
             tunnel_name = name or f"{protocol}_{local_port}"
-            self.tunnels[tunnel_name] = tunnel
+            with self._lock:
+                self.tunnels[tunnel_name] = tunnel
 
             tunnel_info = {
                 "name": tunnel_name,
@@ -64,12 +67,13 @@ class NgrokManager:
             True if successful, False otherwise
         """
         try:
-            if name in self.tunnels:
-                ngrok.disconnect(self.tunnels[name].public_url)
-                del self.tunnels[name]
-                logger.info(f"Tunnel closed: {name}")
-                return True
-            return False
+            with self._lock:
+                if name in self.tunnels:
+                    ngrok.disconnect(self.tunnels[name].public_url)
+                    del self.tunnels[name]
+                    logger.info(f"Tunnel closed: {name}")
+                    return True
+                return False
         except Exception as e:
             logger.error(f"Failed to close tunnel: {str(e)}")
             return False
@@ -81,16 +85,17 @@ class NgrokManager:
         Returns:
             List of tunnel information dictionaries
         """
-        tunnels_list = []
-        for name, tunnel in self.tunnels.items():
-            tunnels_list.append(
-                {
-                    "name": name,
-                    "public_url": tunnel.public_url,
-                    "status": "active",
-                }
-            )
-        return tunnels_list
+        with self._lock:
+            tunnels_list = []
+            for name, tunnel in self.tunnels.items():
+                tunnels_list.append(
+                    {
+                        "name": name,
+                        "public_url": tunnel.public_url,
+                        "status": "active",
+                    }
+                )
+            return tunnels_list
 
     def get_tunnel(self, name: str) -> Optional[Dict]:
         """
@@ -102,20 +107,22 @@ class NgrokManager:
         Returns:
             Tunnel information or None if not found
         """
-        if name in self.tunnels:
-            tunnel = self.tunnels[name]
-            return {
-                "name": name,
-                "public_url": tunnel.public_url,
-                "status": "active",
-            }
-        return None
+        with self._lock:
+            if name in self.tunnels:
+                tunnel = self.tunnels[name]
+                return {
+                    "name": name,
+                    "public_url": tunnel.public_url,
+                    "status": "active",
+                }
+            return None
 
     def close_all(self) -> None:
         """Close all tunnels."""
         try:
-            ngrok.kill()
-            self.tunnels.clear()
+            with self._lock:
+                ngrok.kill()
+                self.tunnels.clear()
             logger.info("All tunnels closed")
         except Exception as e:
             logger.error(f"Failed to close all tunnels: {str(e)}")
